@@ -3,33 +3,28 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import io
-import matplotlib.pyplot as plt
 import yfinance as yf
 import requests
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table
 from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib import colors
 from reportlab.lib.units import inch
 
 # ===================== CONFIGURAÇÃO =====================
-st.set_page_config(page_title="Simulador Financeiro", layout="wide")
-st.title("De R$ 3.000 a Milionário em até 20 Anos")
-st.markdown("### Vida real × Cenário ideal × Poupança")
+st.set_page_config(page_title="Simulador Financeiro", layout="wide", initial_sidebar_state="expanded")
 
-# ===================== DADOS EM TEMPO REAL =====================
+# ===================== FUNÇÕES =====================
 @st.cache_data(ttl=86400)
 def get_dados_reais():
     try:
-        ipca_resp = requests.get("https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados/ultimos/12?formato=json", timeout=10)
-        ipca_data = ipca_resp.json()
-        inflacao = float(np.mean([float(d['valor']) for d in ipca_data]) / 100)
+        ipca = requests.get("https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados/ultimos/12?formato=json", timeout=10).json()
+        inflacao = float(np.mean([float(d['valor']) for d in ipca]) / 100)
     except:
         inflacao = 0.045
 
     try:
-        cdi_data = yf.download("^IRX", period="1y", progress=False)['Close']
-        cdi_anual = float((1 + cdi_data.mean() / 100) ** 12 - 1)
+        cdi = yf.download("^IRX", period="1y", progress=False)['Close'].mean()
+        cdi_anual = float((1 + cdi / 100) ** 12 - 1)
     except:
         cdi_anual = 0.11
 
@@ -38,46 +33,20 @@ def get_dados_reais():
         retorno_ibov = float((ibov.iloc[-1] / ibov.iloc[0]) ** (1/2) - 1)
         volatilidade = float(ibov.pct_change().std() * np.sqrt(252))
     except:
-        retorno_ibov = 0.08
-        volatilidade = 0.12
+        retorno_ibov, volatilidade = 0.08, 0.12
 
     retorno_medio = float(0.6 * cdi_anual + 0.4 * retorno_ibov)
-    cresc_sal = 0.03
-    poupanca_taxa = 0.06
+    return inflacao, 0.03, retorno_medio, volatilidade, 0.06
 
-    return inflacao, cresc_sal, retorno_medio, volatilidade, poupanca_taxa
-
-INFLACAO, CRESC_SALARIO, RETORNO, VOLATILIDADE, POUPANCA_TAXA = get_dados_reais()
-
-# ===================== SIDEBAR =====================
-with st.sidebar:
-    st.header("Seus Dados")
-    idade = st.slider("Idade atual", 18, 50, 25)
-    salario = st.number_input("Salário inicial (R$)", 2000, 15000, 3000)
-    anos = st.selectbox("Prever por quantos anos?", [1, 5, 10, 15, 20], index=2)
-    st.info(f"**Início:** R$ 3.000 | **Previsão:** {anos} anos")
-
-    st.markdown("### Parâmetros")
-    st.write(f"**Inflação:** {float(INFLACAO):.1%}")
-    st.write(f"**Cresc. Salarial:** {float(CRESC_SALARIO):.1%}")
-    st.write(f"**Retorno Médio:** {float(RETORNO):.1%}")
-    st.write(f"**Poupança:** {float(POUPANCA_TAXA):.1%}")
-
-MESES_TOTAIS = anos * 12
-
-# ===================== ESTADO =====================
-if 'initialized' not in st.session_state:
-    st.session_state.escolhas = {}
-    st.session_state.salario_atual = float(salario)
-    st.session_state.initialized = True
-
-# ===================== SIMULAÇÃO COM EVENTOS =====================
-def prever_patrimonio(pat_ini, sal_ini, escolhas, meses):
+def prever_patrimonio(pat_ini, sal_ini, escolhas, meses, aporte_percentual=0.3):
     sim = 500
     res = np.zeros((sim, meses + 1))
     res_poup = np.zeros((sim, meses + 1))
-    res[:, 0] = pat_ini
-    res_poup[:, 0] = pat_ini
+    res[:, 0] = res_poup[:, 0] = pat_ini
+
+    ret_mensal_medio = (1 + RETORNO)**(1/12) - 1
+    vol_mensal = VOLATILIDADE / np.sqrt(12)
+    poup_mensal = (1 + POUPANCA_TAXA)**(1/12) - 1
 
     for s in range(sim):
         pat = pat_ini
@@ -93,12 +62,13 @@ def prever_patrimonio(pat_ini, sal_ini, escolhas, meses):
             gastos = sum(escolhas.get(k, 0) for k in ['moradia','transporte','lazer','educacao']) * infl
             if filho_ativa: gastos += 800 * infl
             sobra = max(sal - gastos, 0)
-            invest = min(escolhas.get('investimento', 0), sobra)
+
+            # APORTE = 30% DA SOBRA (ou valor fixo, se menor)
+            invest = min(sobra * aporte_percentual, sobra)
 
             evento = eventos[m-1]
             if evento == 'demissao' and demissao_meses == 0:
-                sal *= 0.5
-                demissao_meses = 6
+                sal *= 0.5; demissao_meses = 6
             if demissao_meses > 0:
                 demissao_meses -= 1
                 if demissao_meses == 0: sal = sal_ini * (1 + CRESC_SALARIO) ** ano
@@ -107,167 +77,265 @@ def prever_patrimonio(pat_ini, sal_ini, escolhas, meses):
             elif evento == 'promocao': sal *= 1.2
 
             if m % 12 == 1 and m > 1: sal *= (1 + CRESC_SALARIO)
-            ret = np.random.normal(RETORNO/12, VOLATILIDADE/np.sqrt(12))
-            pat = max(pat * (1 + ret) + invest, 0)
-            res[s, m] = pat
 
-            pat_poup = pat_poup * (1 + POUPANCA_TAXA/12) + invest
+            ret = np.random.normal(ret_mensal_medio, vol_mensal)
+            pat = max(pat * (1 + ret) + invest, 0)
+            pat_poup = pat_poup * (1 + poup_mensal) + invest
+
+            res[s, m] = pat
             res_poup[s, m] = pat_poup
 
     return res, res_poup
 
-# ===================== SIMULAÇÃO SEM EVENTOS (IDEAL) =====================
-def prever_patrimonio_sem_eventos(pat_ini, sal_ini, escolhas, meses):
+def prever_patrimonio_sem_eventos(pat_ini, sal_ini, escolhas, meses, aporte_percentual=0.3):
     res = np.zeros(meses + 1)
     pat = pat_ini
     sal = sal_ini
     res[0] = pat_ini
+
+    ret_mensal = (1 + RETORNO)**(1/12) - 1
 
     for m in range(1, meses + 1):
         ano = (m - 1) // 12
         infl = (1 + INFLACAO) ** ano
         gastos = sum(escolhas.get(k, 0) for k in ['moradia','transporte','lazer','educacao']) * infl
         sobra = max(sal - gastos, 0)
-        invest = min(escolhas.get('investimento', 0), sobra)
+        invest = sobra * aporte_percentual
 
         if m % 12 == 1 and m > 1: sal *= (1 + CRESC_SALARIO)
-        ret = RETORNO / 12
-        pat = pat * (1 + ret) + invest
+        pat = pat * (1 + ret_mensal) + invest
         res[m] = pat
 
     return res
 
-# ===================== ESCOLHAS =====================
-st.markdown("### Faça suas escolhas mensais")
-col1, col2 = st.columns(2)
-with col1:
-    moradia = st.selectbox("Moradia", [("Quitinete", 800), ("1 quarto", 1400), ("Com pais", 0)])
-    transporte = st.selectbox("Transporte", [("Ônibus", 300), ("Moto", 500), ("Carro", 1200),("Sem Transporte", 0)])
-    investimento = st.slider("Investir por mês", 0, 2000, 400)
-with col2:
-    lazer = st.selectbox("Lazer", [("Baixo", 200), ("Médio", 500), ("Alto", 1000)])
-    educacao = st.selectbox("Educação", [("Nenhum", 0), ("Curso", 150), ("Faculdade", 800)])
+def gerar_tabela_anual(df, sem_eventos, df_poup, anos):
+    meses_por_ano = 12
+    tabela = []
+    for ano in range(anos + 1):
+        mes = ano * meses_por_ano
+        if mes >= len(df): break
+        tabela.append({
+            "Ano": ano,
+            "Vida Real": f"R$ {df['mediana'].iloc[mes]:,.0f}",
+            "Ideal": f"R$ {sem_eventos[mes]:,.0f}",
+            "Poupança": f"R$ {df_poup.iloc[mes]:,.0f}"
+        })
+    return pd.DataFrame(tabela)
 
-gastos = moradia[1] + transporte[1] + lazer[1] + educacao[1]
-sobra = st.session_state.salario_atual - gastos
-invest_real = min(investimento, max(sobra, 0))
+def sugerir_otimizacao(gastos, sobra, salario,escolhas):
+    sugestoes = []
+    if gastos > salario * 0.7:
+        sugestoes.append("Reduza moradia ou lazer para < 50% do salário.")
+    if sobra < salario * 0.3:
+        sugestoes.append("Aumente a sobra para pelo menos 30% do salário.")
+    if 'investimento' in escolhas and escolhas['investimento'] < sobra * 0.5:
+        sugestoes.append("Invista pelo menos 50% da sobra.")
+    if 'moradia' in escolhas and escolhas['moradia'] > 1000:
+        sugestoes.append("Morar com pais ou quitinete economiza R$1.000+/mês.")
+    return sugestoes or ["Você já está no caminho certo!"]
 
-st.metric("Salário", f"R$ {st.session_state.salario_atual:,.0f}")
-st.metric("Gastos Totais", f"R$ {gastos:,.0f}")
-st.metric("Sobra Líquida", f"R$ {sobra:,.0f}", delta=sobra)
+def gerar_pdf(vida_real, ideal, poupanca, salario, anos):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
+    story = [
+        Paragraph("Relatório Financeiro", styles['Title']),
+        Spacer(1, 12),
+        Table([
+            ["Salário Inicial", f"R$ {salario:,.0f}"],
+            ["Período", f"{anos} ano(s)"],
+            ["Vida Real", f"R$ {vida_real:,.0f}"],
+            ["Ideal", f"R$ {ideal:,.0f}"],
+            ["Poupança", f"R$ {poupanca:,.0f}"],
+        ])
+    ]
+    doc.build(story)
+    return buffer.getvalue()
 
-if sobra < -1000:
-    st.error("Reduza gastos para simular!")
-elif investimento > sobra:
-    st.warning(f"Investimento ajustado para R$ {sobra:,.0f}")
+# ===================== DADOS REAIS + SEGURANÇA =====================
+INFLACAO, CRESC_SALARIO, RETORNO, VOLATILIDADE, POUPANCA_TAXA = get_dados_reais()
+RETORNO = min(RETORNO, 0.20)
+VOLATILIDADE = min(VOLATILIDADE, 0.50)
 
-# ===================== BOTÃO =====================
-if st.button("PULAR PARA O FINAL", type="primary", use_container_width=True):
-    if sobra >= -1000:
-        st.session_state.escolhas = {
-            'moradia': moradia[1], 'transporte': transporte[1],
-            'lazer': lazer[1], 'educacao': educacao[1],
-            'investimento': invest_real
-        }
+# ===================== JS + CSS =====================
+st.markdown("""
+<script>
+    function hideSidebar() {
+        const sidebar = parent.document.querySelector('[data-testid="stSidebar"]');
+        const main = parent.document.querySelector('.main');
+        if (sidebar) sidebar.style.display = 'none';
+        if (main) main.style.marginLeft = '0';
+    }
+    function showSidebar() {
+        const sidebar = parent.document.querySelector('[data-testid="stSidebar"]');
+        const main = parent.document.querySelector('.main');
+        if (sidebar) sidebar.style.display = 'block';
+        if (main) main.style.marginLeft = '18rem';
+    }
+</script>
+<style>
+    .main > div { padding-left: 2rem; padding-right: 2rem; }
+    @media (max-width: 768px) {
+        .main > div { padding-left: 1rem; padding-right: 1rem; }
+        h1 { font-size: 1.8rem !important; }
+    }
+</style>
+""", unsafe_allow_html=True)
 
-        with st.spinner("Calculando..."):
-            previsoes, poupanca = prever_patrimonio(3000, salario, st.session_state.escolhas, MESES_TOTAIS)
-            df = pd.DataFrame(previsoes.T)
-            df['mês'] = range(MESES_TOTAIS + 1)
-            df['mediana'] = df.median(axis=1)
-            df['p10'] = df.quantile(0.1, axis=1)
-            df['p90'] = df.quantile(0.9, axis=1)
+# ===================== ESTADO =====================
+if 'simulacao_feita' not in st.session_state:
+    st.session_state.simulacao_feita = False
+if 'sidebar_hidden' not in st.session_state:
+    st.session_state.sidebar_hidden = False
 
-            df_poup = pd.DataFrame(poupanca.T)
-            df_poup['mês'] = range(MESES_TOTAIS + 1)
-            df_poup['mediana_poup'] = df_poup.median(axis=1)
+# ===================== BOTÃO FLUTUANTE =====================
+if st.session_state.sidebar_hidden:
+    st.markdown("""
+    <button onclick="showSidebar(); window.location.reload();" 
+            style="position:fixed; top:15px; left:15px; z-index:9999; 
+                   background:#1a1a2e; color:white; border:none; padding:10px 16px; 
+                   border-radius:8px; font-size:14px; cursor:pointer; box-shadow:0 2px 5px rgba(0,0,0,0.2);">
+        Opções
+    </button>
+    """, unsafe_allow_html=True)
 
-            sem_eventos = prever_patrimonio_sem_eventos(3000, salario, st.session_state.escolhas, MESES_TOTAIS)
-            df_sem = pd.DataFrame({'mês': range(MESES_TOTAIS + 1), 'sem_eventos': sem_eventos})
-
-        st.success("Cálculo concluído!")
-        st.balloons()
-
-        # === GRÁFICO COM 3 CENÁRIOS ===
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=list(df['mês']) + list(df['mês'])[::-1], y=list(df['p10']) + list(df['p90'])[::-1],
-                                fill='toself', fillcolor='rgba(0,176,246,0.2)', line=dict(color='rgba(255,255,255,0)'), name='Intervalo 80%'))
-        fig.add_trace(go.Scatter(x=df['mês'], y=df['mediana'], mode='lines', name='Com Eventos (vida real)', line=dict(color='green', width=3)))
-        fig.add_trace(go.Scatter(x=df_sem['mês'], y=df_sem['sem_eventos'], mode='lines', name='Sem Eventos (ideal)', line=dict(color='purple', width=3, dash='dot')))
-        fig.add_trace(go.Scatter(x=df_poup['mês'], y=df_poup['mediana_poup'], mode='lines', name='Poupança', line=dict(color='orange', dash='dash')))
-        fig.update_layout(title="Comparação: Vida Real × Ideal × Poupança", xaxis_title="Mês", yaxis_title="R$", height=500)
-        st.plotly_chart(fig, use_container_width=True)
-
-        final = df.iloc[-1]
-        final_poup = df_poup.iloc[-1]
-        final_sem = df_sem.iloc[-1]['sem_eventos']
-
-        st.markdown("### Métricas Finais")
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("**Com Eventos**", f"R$ {final['mediana']:,.0f}")
-        c2.metric("**Sem Eventos**", f"R$ {final_sem:,.0f}", delta=f"+R$ {final_sem - final['mediana']:,.0f}")
-        c3.metric("**Poupança**", f"R$ {final_poup['mediana_poup']:,.0f}")
-        c4.metric("**Pior 10%**", f"R$ {final['p10']:,.0f}")
-        c5.metric("**Melhor 10%**", f"R$ {final['p90']:,.0f}")
-
-        # === PDF (atualizado com 3 cenários) ===
-        def gerar_imagem_png():
-            plt.figure(figsize=(10, 6))
-            plt.fill_between(df['mês'], df['p10'], df['p90'], color='lightblue', alpha=0.5, label='Intervalo 80%')
-            plt.plot(df['mês'], df['mediana'], 'g-', label='Com Eventos', linewidth=3)
-            plt.plot(df_sem['mês'], df_sem['sem_eventos'], 'purple', label='Sem Eventos', linewidth=3, linestyle=':')
-            plt.plot(df_poup['mês'], df_poup['mediana_poup'], 'orange', label='Poupança', linestyle='--')
-            plt.title(f"Comparação em {anos} ano(s)")
-            plt.xlabel("Mês")
-            plt.ylabel("Patrimônio (R$)")
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            plt.tight_layout()
-            buf = io.BytesIO()
-            plt.savefig(buf, format='png', dpi=150)
-            plt.close()
-            buf.seek(0)
-            return buf
-
-        def gerar_pdf():
-            buf = io.BytesIO()
-            doc = SimpleDocTemplate(buf, pagesize=letter)
-            styles = getSampleStyleSheet()
-            story = []
-            story.append(Paragraph("<b>Relatório Financeiro</b>", styles['Title']))
-            story.append(Spacer(1, 12))
-            story.append(Table([
-                ["Salário Inicial", f"R$ {salario:,.0f}"],
-                ["Anos", str(anos)],
-                ["Com Eventos", f"R$ {final['mediana']:,.0f}"],
-                ["Sem Eventos", f"R$ {final_sem:,.0f}"],
-                ["Poupança", f"R$ {final_poup['mediana_poup']:,.0f}"],
-            ]))
-            img = gerar_imagem_png()
-            story.append(Spacer(1, 12))
-            story.append(Image(img, width=6*inch, height=3.5*inch))
-            doc.build(story)
-            return buf.getvalue()
+# ===================== SIDEBAR =====================
+if not st.session_state.sidebar_hidden:
+    with st.sidebar:
+        st.markdown("### Seus Dados")
+        idade = st.slider("Idade atual", 18, 50, 25)
+        salario = st.number_input("Salário inicial (R$)", 2000, 15000, 3000, step=100)
+        anos = st.selectbox("Prever por quantos anos?", [1, 5, 10, 15, 20], index=2)
 
         st.markdown("---")
-        st.subheader("Baixar Relatório")
-        pdf_data = gerar_pdf()
-        col_d1, col_d2 = st.columns(2)
-        with col_d1:
-            st.download_button("PDF", data=pdf_data, file_name="relatorio.pdf", mime="application/pdf")
-        with col_d2:
-            st.download_button("CSV", data=df[['mês','mediana','p10','p90']].to_csv(index=False), file_name="dados.csv", mime="text/csv")
+        st.markdown("### Parâmetros Econômicos")
+        st.markdown(f"**Inflação:** {INFLACAO:.1%}")
+        st.markdown(f"**Cresc. Salarial:** {CRESC_SALARIO:.1%}")
+        st.markdown(f"**Retorno Médio:** {RETORNO:.1%}")
+        st.markdown(f"**Poupança:** {POUPANCA_TAXA:.1%}")
 
-        if st.button("Nova Simulação"):
-            for k in list(st.session_state.keys()): del st.session_state[k]
+MESES_TOTAIS = anos * 12 if 'anos' in locals() else 120
+
+# ===================== TÍTULO =====================
+st.markdown("<h1 style='text-align:center; color:#ffffff;'>De R$ 3.000 a Milionário</h1>", unsafe_allow_html=True)
+st.markdown("<p style='text-align:center; color:#ffffff;'>Vida real × Ideal × Poupança</p>", unsafe_allow_html=True)
+
+# ===================== ESCOLHAS =====================
+if not st.session_state.simulacao_feita and not st.session_state.sidebar_hidden:
+    col1, col2 = st.columns(2)
+    with col1:
+        moradia = st.selectbox("Moradia", ["Quitinete (R$800)", "1 quarto (R$1.400)", "Com pais (R$0)"])
+        transporte = st.selectbox("Transporte", ["Ônibus (R$300)", "Moto (R$500)", "Carro (R$1.200)", "Sem (R$0)"])
+    with col2:
+        lazer = st.selectbox("Lazer", ["Baixo (R$200)", "Médio (R$500)", "Alto (R$1.000)"])
+        educacao = st.selectbox("Educação", ["Nenhum (R$0)", "Curso (R$150)", "Faculdade (R$800)"])
+
+    gastos_map = {
+        "Quitinete (R$800)": 800, "1 quarto (R$1.400)": 1400, "Com pais (R$0)": 0,
+        "Ônibus (R$300)": 300, "Moto (R$500)": 500, "Carro (R$1.200)": 1200, "Sem (R$0)": 0,
+        "Baixo (R$200)": 200, "Médio (R$500)": 500, "Alto (R$1.000)": 1000,
+        "Nenhum (R$0)": 0, "Curso (R$150)": 150, "Faculdade (R$800)": 800
+    }
+    
+    gastos = sum(gastos_map[x] for x in [moradia, transporte, lazer, educacao])
+    sobra = salario - gastos
+
+    st.markdown("### Resumo Atual")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Salário", f"R$ {salario:,.0f}")
+    c2.metric("Gastos", f"R$ {gastos:,.0f}")
+    c3.metric("Sobra", f"R$ {sobra:,.0f}")
+
+    if sobra < 0:
+        st.error("Déficit! Reduza gastos.")
+    else:
+        st.info(f"**Aporte mensal:** R$ {sobra * 0.3:,.0f} (30% da sobra)")
+
+    # BOTÃO OTIMIZAR
+    if st.button("OTIMIZAR MINHAS ESCOLHAS", type="secondary", use_container_width=True):
+        escolhas_temp = {'moradia': gastos_map[moradia], 'transporte': gastos_map[transporte],
+                        'lazer': gastos_map[lazer], 'educacao': gastos_map[educacao]}
+        sugestoes = sugerir_otimizacao(gastos, sobra, salario, escolhas_temp)
+        st.markdown("### Sugestões para Melhorar")
+        for s in sugestoes:
+            st.markdown(f"- {s}")
+
+# ===================== SIMULAR =====================
+if not st.session_state.simulacao_feita and not st.session_state.sidebar_hidden:
+    if st.button("PULAR PARA O FINAL", type="primary", use_container_width=True):
+        if sobra < 0:
+            st.error("Corrija o déficit.")
+        else:
+            escolhas = {k: gastos_map[v] for k, v in zip(['moradia','transporte','lazer','educacao'], [moradia,transporte,lazer,educacao])}
+
+            with st.spinner("Simulando 500 cenários com 30% da sobra..."):
+                previsoes, poupanca = prever_patrimonio(3000, salario, escolhas, MESES_TOTAIS, aporte_percentual=0.3)
+                df = pd.DataFrame(previsoes.T)
+                df['mês'] = range(MESES_TOTAIS + 1)
+                df['mediana'] = df.iloc[:, :500].median(axis=1)
+                df['p10'] = df.iloc[:, :500].quantile(0.1, axis=1)
+                df['p90'] = df.iloc[:, :500].quantile(0.9, axis=1)
+                df_poup = pd.DataFrame(poupanca.T).median(axis=1)
+                sem_eventos = prever_patrimonio_sem_eventos(3000, salario, escolhas, MESES_TOTAIS, aporte_percentual=0.3)
+
+            st.session_state.resultados = {
+                'df': df, 'df_poup': df_poup, 'sem_eventos': sem_eventos,
+                'final': df.iloc[-1], 'anos': anos, 'salario': salario
+            }
+            st.session_state.simulacao_feita = True
+            st.session_state.sidebar_hidden = True
+
+            st.markdown("<script>hideSidebar();</script>", unsafe_allow_html=True)
             st.rerun()
 
-# ===================== FONTES =====================
+# ===================== RESULTADO =====================
+if st.session_state.simulacao_feita:
+    res = st.session_state.resultados
+    df, df_poup, sem_eventos = res['df'], res['df_poup'], res['sem_eventos']
+    final, anos, salario = res['final'], res['anos'], res['salario']
+
+    st.success("Simulação concluída!")
+    st.balloons()
+
+    # GRÁFICO
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df['mês'], y=df['p10'], fill=None, mode='lines', line_color='lightgray'))
+    fig.add_trace(go.Scatter(x=df['mês'], y=df['p90'], fill='tonexty', fillcolor='rgba(100,100,255,0.15)', line_color='lightgray', name='80%'))
+    fig.add_trace(go.Scatter(x=df['mês'], y=df['mediana'], name='Vida Real', line=dict(color='#28a745', width=3)))
+    fig.add_trace(go.Scatter(x=df['mês'], y=sem_eventos, name='Ideal', line=dict(color='#9c27b0', width=3, dash='dot')))
+    fig.add_trace(go.Scatter(x=df['mês'], y=df_poup, name='Poupança', line=dict(color='#ff9800', width=3, dash='dash')))
+    fig.update_layout(title="Evolução do Patrimônio", xaxis_title="Meses", yaxis_title="R$", height=500)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # RESULTADO FINAL
+    st.markdown(f"### Resultado em {anos} ano(s)")
+    cols = st.columns(5)
+    cols[0].metric("Vida Real", f"R$ {float(final['mediana']):,.0f}")
+    cols[1].metric("Ideal", f"R$ {float(sem_eventos[-1]):,.0f}")
+    cols[2].metric("Poupança", f"R$ {float(df_poup.iloc[-1]):,.0f}")
+    cols[3].metric("Pior 10%", f"R$ {float(final['p10']):,.0f}")
+    cols[4].metric("Melhor 10%", f"R$ {float(final['p90']):,.0f}")
+
+    # TABELA ANUAL
+    st.markdown("### Evolução Ano a Ano")
+    tabela_anual = gerar_tabela_anual(df, sem_eventos, df_poup, anos)
+    st.dataframe(tabela_anual, use_container_width=True)
+
+    # DOWNLOADS
+    col_d1, col_d2 = st.columns(2)
+    with col_d1:
+        csv = df[['mês','mediana','p10','p90']].to_csv(index=False).encode()
+        st.download_button("CSV", csv, "dados.csv", "text/csv", use_container_width=True)
+    with col_d2:
+        pdf = gerar_pdf(float(final['mediana']), float(sem_eventos[-1]), float(df_poup.iloc[-1]), salario, anos)
+        st.download_button("PDF", pdf, "relatorio.pdf", "application/pdf", use_container_width=True)
+
+    if st.button("RESETAR E REABRIR OPÇÕES", type="secondary", use_container_width=True):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.markdown("<script>showSidebar();</script>", unsafe_allow_html=True)
+        st.rerun()
+
+# ===================== RODAPÉ =====================
 st.markdown("---")
-st.markdown("### Fontes Oficiais")
-st.markdown("""
-- **Inflação (IPCA):** [BCB](https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados)  
-- **Ibovespa:** [Yahoo Finance](https://finance.yahoo.com/quote/%5EBVSP/)  
-- **Poupança:** [BCB](https://www.bcb.gov.br/estabilidadefinanceira/poupanca)  
-""")
-st.caption("Simulação educativa.")
+st.caption("Fontes: BCB, Yahoo Finance. Simulação educativa. Aporte = 30% da sobra.")
