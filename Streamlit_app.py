@@ -18,7 +18,7 @@ st.set_page_config(page_title="Simulador Financeiro", layout="wide", initial_sid
 def get_dados_reais():
     try:
         ipca = requests.get("https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados/ultimos/12?formato=json", timeout=10).json()
-        inflacao = float(np.mean([float(d['valor']) for d in ipca]) / 100)
+        inflacao = float(np.mean([float(d['valorr']) for d in ipca]) / 100)
     except:
         inflacao = 0.045
 
