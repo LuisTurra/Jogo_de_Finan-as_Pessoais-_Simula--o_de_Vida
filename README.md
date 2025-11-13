@@ -1,5 +1,5 @@
 # Simulador Financeiro: De R$ 3.000 a Milionário (ou Quebrado)
-
+#Demo: https://luisturra-jogo-de-finan-as-pessoais--simul-streamlit-app-isw5b2.streamlit.app/
 Um jogo/simulador **realista** que mostra como suas escolhas diárias impactam seu patrimônio em **1, 5, 10, 15 ou 20 anos**.
 
 ---
